@@ -33,9 +33,41 @@ foreach ($part in $manifest.parts) {
     $partial = $archive + '.partial'
     if (-not (Test-Path -LiteralPath $archive)) {
         Write-Host ('Downloading ' + $part.name)
-        & curl.exe --fail --location --retry 4 --continue-at - --output $partial $part.url
-        if ($LASTEXITCODE -ne 0) { throw ('Download failed: ' + $part.name + '. Run this script again to resume.') }
-        if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant() -ne $part.sha256) { throw ('Checksum mismatch: ' + $partial + '. Delete only this incomplete download and retry.') }
+        
+        # Auto-retry với xóa file lỗi nếu checksum sai
+        $downloadOK = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if ($attempt -gt 1) {
+                Write-Host "  Retry $attempt/3: Deleting corrupted file and downloading from scratch..."
+                Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+            }
+            
+            # Tải từ đầu thay vì resume để tránh lỗi
+            & curl.exe --fail --location --retry 3 --connect-timeout 30 --output $partial $part.url
+            
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "  Download failed on attempt $attempt (exit code: $LASTEXITCODE)"
+                continue
+            }
+            
+            if (-not (Test-Path -LiteralPath $partial)) {
+                Write-Warning "  Download file was not created on attempt $attempt"
+                continue
+            }
+            
+            $actualHash = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -eq $part.sha256.ToLowerInvariant()) {
+                $downloadOK = $true
+                break
+            }
+            
+            Write-Warning "  Checksum mismatch on attempt $attempt"
+        }
+        
+        if (-not $downloadOK) {
+            throw "Unable to download and verify $($part.name) after 3 attempts. Check network connection or URL in download-manifest.json"
+        }
+        
         Move-Item -LiteralPath $partial -Destination $archive
     }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $part.sha256) { throw ('Checksum mismatch: ' + $archive) }
